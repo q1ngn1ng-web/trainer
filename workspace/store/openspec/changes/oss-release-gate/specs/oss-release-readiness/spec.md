@@ -41,10 +41,21 @@ README 与 `.env.example` MUST 说明每个环境变量的默认值；写进 `.e
 - **WHEN** `.env` 里写 `TRAINER_TZ=UTC` 后启动
 - **THEN** 若 README 标注该变量写进 `.env` 不生效，实际时区保持默认值；修复后实际时区为 UTC，且该标注随之移除
 
+### Requirement: 多语言 README 保持同步
+
+仓库若提供默认语言之外的 README 版本，各版本 MUST 与默认版本保持相同的章节结构，并在以下事实上
+MUST 完全一致：快速开始的步骤、环境变量表、"现在不是 agent"的声明、证据边界、截图引用。
+默认版本的事实变更 MUST 在同一次提交里同步到全部语言版本。
+
+#### Scenario: 两个版本的事实一致
+
+- **WHEN** 默认版本的快速开始新增或修改了一个步骤
+- **THEN** 同一提交里英文版本也包含同样的步骤，两个版本的截图引用指向同一组文件
+
 ### Requirement: 依赖清单可安装
 
-`requirements.txt` SHALL 覆盖启动与测试所需的全部直接依赖（含 fastapi、uvicorn、
-python-multipart、pytest），且不含重复项。
+`requirements.txt` SHALL 覆盖启动与测试所需的全部直接依赖（含 fastapi、uvicorn、pytest 以及
+测试客户端所需的 httpx），且不含重复项。
 
 #### Scenario: 全新虚拟环境安装
 

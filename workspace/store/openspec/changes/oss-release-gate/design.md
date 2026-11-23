@@ -10,7 +10,7 @@
 | 触发面 | 带 `plan_id` 的作答 20 条 | 同上，`SELECT COUNT(*) FROM practice_attempts WHERE plan_id IS NOT NULL` |
 | 测试为何没抓到 | `tests/test_coach_memory.py` 的 `_record_today(..., plan_id=None)` 默认不带 `plan_id` → `plan_ids` 为空 → 跳过元数据查询 | 读 `TestSessionSummary` 用例 |
 | README 指向一代 UI | Quick Start 第 5 步 `uv run streamlit run src/main.py`，打开 8501 | 读 `README.md` |
-| 依赖装不出来 | `requirements.txt` 11 行，无 fastapi / uvicorn / python-multipart / pytest；环境内实际为 fastapi 0.141.1、uvicorn 0.51.0、python-multipart 0.0.32、pytest 9.1.1 | 读文件 + `ls .venv/lib/python3.12/site-packages` |
+| 依赖装不出来 | `requirements.txt` 11 行，无 fastapi / uvicorn / pytest；环境内实际为 fastapi 0.141.1、uvicorn 0.51.0、pytest 9.1.1（python-multipart 虽已安装，但代码并不依赖） | 读文件 + `ls .venv/lib/python3.12/site-packages` |
 | 一代流程已不可达 | `src/api/app.py` 对 trainer_service / scoring_service / keyword_service / baseline_service / renderer / file_writer 的引用数均为 0；这些模块只被 `scripts/` 引用。合计约 1,214 行 + `src/ui/` 2,661 行 + `src/main.py` 168 行 ≈ 4,043 行 | 逐模块反向 grep |
 | 私人材料被跟踪 | `workspace/面试/` 7、`workspace/record/` 90、`workspace/evidence/` 19（含"真实数据"CSV）、`workspace/prompts/` 3、`data/` 下 1 个 PDF | `git -c core.quotepath=false ls-files`（**注意**：不加该参数时中文路径被八进制转义，按中文 grep 会误判为 0） |
 | 历史无密钥 | 全部提交内 `sk-[A-Za-z0-9]{32,}` 零命中；`.env` 与 `data/trainer.db` 从未入库；跟踪内容里无测试账号口令 | `git rev-list --all` 逐提交 `git grep` |

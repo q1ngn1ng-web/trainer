@@ -18,7 +18,7 @@
    恰好绕开出错分支。
 2. **README 把新人带到已下线的产品**：Quick Start 仍是 `streamlit run src/main.py`
    （一代 UI，Vue 版已完整取代）；`requirements.txt` 没有 fastapi / uvicorn /
-   python-multipart / pytest，按 README 装不出可运行的后端；"测试"一节指向的
+   pytest，按 README 装不出可运行的后端；"测试"一节指向的
    `scripts/e2e_full_flow.py` 跑的是一代生成流程；AGENTS.md 仍称 `src/` 是
    "仅作参考的 Streamlit demo"。
 3. **仓库里混着私人材料**：`git ls-files` 里有 `workspace/面试/`（7 个文件）、
