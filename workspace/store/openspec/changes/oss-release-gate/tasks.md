@@ -21,6 +21,12 @@
       `POST /api/wizard/start` 返回 401——它和另外 17 个端点一样硬性要求登录用户
       （`_require_user` / `require_viewer`），而免登录模式下没有用户。推荐**废弃**：
       注册已开放且只存本地，免登录模式只剩误导；实施见 2.8。
+- [ ] 0.7 **待拍板**：开发主仓与公开仓的关系。2026-11-24 已按 0.2 落地：新建公开仓
+      `q1ngn1ng-web/trainer`（全新历史，单提交快照），旧仓保持公开不动。但本地开发仓的
+      `origin` 仍指向旧仓，新公开仓只是一次性快照，**从现在起两边开始分叉**。推荐把
+      `trainer` 变成唯一的开发主仓：把不进公开仓的私人材料移到仓库之外，本地仓改指新仓；
+      过渡期至少要有一条"本地 → 公开仓"的同步流程。无论选哪种，都**禁止**把本地完整历史
+      直接 push 到 `trainer`——那会毁掉"全新历史"。
 
 ## 1. 录制前必须绿
 
@@ -92,6 +98,10 @@
       测试：临时改写 `.env` 后断言 `local_tz()` 随之变化，测试结束恢复。
 - [ ] 2.10 `docs/architecture.md` 的"项目定位"段仍是早期口径（"MVP 阶段只有用户本人（自用）"、
       十要素文件生成），与现役的向导流程不符。更新后可从 README 的架构一节链接过去。
+- [ ] 2.11 四个评测脚本写死了 `/home/ubuntu/...` 绝对路径（`eval_grading_consistency.py`、
+      `eval_grading_memory_cost.py`、`eval_purpose_model_routing.py`、`eval_schema_first_pass.py`），
+      外人克隆下来跑不了。改为相对项目根目录解析。其中 `eval_purpose_model_routing.py` 会随
+      `retire-legacy-v1` 删除，可以先跳过。
 
 ## 3. 一周内（贡献者基础设施）
 

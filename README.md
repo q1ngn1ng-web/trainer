@@ -79,7 +79,8 @@ uvicorn src.api.app:app --port 8501
 浏览器打开 <http://127.0.0.1:8501>，注册一个账号即可使用——账号和数据只存在你本地的 SQLite 里。
 请在项目根目录执行启动命令，`.env` 才会被读到。
 
-**在中国大陆网络下**，直连 PyPI 和 npm 官方源可能极慢甚至超时。给两条安装命令加上镜像：
+**在中国大陆网络下**，直连 PyPI 和 npm 官方源可能极慢甚至超时，克隆也可能很慢。克隆慢时改用 SSH 地址
+`git@github.com:q1ngn1ng-web/trainer.git`；两条安装命令加上镜像：
 
 ```bash
 uv pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
