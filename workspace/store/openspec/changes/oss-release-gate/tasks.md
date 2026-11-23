@@ -102,6 +102,9 @@
       `eval_grading_memory_cost.py`、`eval_purpose_model_routing.py`、`eval_schema_first_pass.py`），
       外人克隆下来跑不了。改为相对项目根目录解析。其中 `eval_purpose_model_routing.py` 会随
       `retire-legacy-v1` 删除，可以先跳过。
+- [ ] 2.12 把公开仓的导出与隐私扫描固化成一个脚本放进 `scripts/`：白名单与排除项只写一处，
+      导出后自动扫描密钥形态、邮箱、手机号并打印差异。现在只是 record
+      `20261124_chore_public-repo-trainer.md` 里的一段手动命令，每次同步都要手敲，容易漏排除项。
 
 ## 3. 一周内（贡献者基础设施）
 

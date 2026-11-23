@@ -56,6 +56,24 @@
 - 初始提交的作者身份用的是 GitHub 的 noreply 邮箱（提交会关联到账号头像），没有沿用本地仓里
   邮箱域为 `local` 的占位身份。
 
+## 手动同步流程（待拍板 0.7 定下来之前的临时做法）
+
+```bash
+REPO=/home/ubuntu/py_code/personal_trainer_agent; EXP=/tmp/trainer-public
+cd "$EXP" && find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+(cd "$REPO" && git archive HEAD .env.example .gitignore .gitattributes .opencode .streamlit \
+   AGENTS.md LICENSE README.md codemap.md requirements.txt docs scripts src tests web workspace \
+   | tar -x -C "$EXP")
+rm -rf "$EXP/workspace/面试" "$EXP/workspace/prompts" "$EXP/workspace/AUDIT-BRIEF.md" $EXP/workspace/SUMMARY-*.md
+rm -f "$EXP"/workspace/evidence/判分一致性标注-{工作表.csv,工作表-真实数据.csv,人工填写.md,练习集.md}
+git -C "$EXP" add -A && git -C "$EXP" status --short      # 先看 diff，只应出现本次的改动
+git -C "$EXP" commit -m "<同步说明>" && git -C "$EXP" push origin main
+```
+
+`/tmp/trainer-public` 不存在时（重启后会消失），先
+`git clone git@github.com:q1ngn1ng-web/trainer.git /tmp/trainer-public` 再执行。
+排除项目前是手写的，容易漏——固化成脚本列为 `oss-release-gate` 任务 2.12。
+
 ## 踩坑
 
 - `git ls-remote https://github.com/...` 在本机卡住超过 100 秒，SSH 秒回——涉及 GitHub 的
