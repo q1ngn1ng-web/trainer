@@ -1,0 +1,689 @@
+"""测验服务：取题（排除冷却期内的原题）、生成变式、判分、成绩与回退重练。
+
+对应 OpenSpec change ``training-execution-feedback`` 的 ``periodic-assessment`` 能力与 ADR-0016：
+
+* 题目从**题库**里抽，且只抽**冷却期已过**的题（不是"近期练过的原题"）
+* 优先用 LLM 生成**变式题**（换场景/换问法/改条件）；LLM 不可用时退回冷却期外的原题并显式标记
+* 判分优先用 LLM；不可用时降级为**用户自评**（并标注这是自评，不让系统假装判过分）
+* 未通过 → 相关题目追加**补练轮次**（回退重练，ADR-0016 决策 5）
+"""
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from typing import Any
+
+from src.core.plan import local_today
+from src.db.models import Assessment, AssessmentItem
+from src.db.sqlite import get_connection
+from src.llm.client import DEEPSEEK_MODEL, PROMPT_REGISTRY, complete
+from src.llm.schema import SCHEMA_REGISTRY
+from src.services import attempt_service, grading_cache, memory_service, plan_service
+
+logger = logging.getLogger("src.services.quiz_service")
+
+#: 一次测验最多几道题（题量上限，ADR-0018 决策 7 的成本控制）
+QUIZ_SIZE: int = 5
+
+#: 通过线：答对比例
+QUIZ_PASS_RATIO: float = 0.8
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _connect(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
+    return conn if conn is not None else get_connection()
+
+
+@dataclass
+class QuizQuestion:
+    """一道测验题。"""
+
+    item_key: str
+    knowledge_point: str
+    question: str
+    reference_answer: str
+    is_variant: bool = True
+
+
+@dataclass
+class QuizResult:
+    """一次测验的结果摘要。"""
+
+    assessment_id: int
+    training_id: int
+    question_count: int
+    score: float
+    passed: bool
+    failed_items: list[dict[str, Any]] = field(default_factory=list)
+    extra_rounds: int = 0
+    graded_by: str = "llm"
+    #: 终测未通过时追加的会话周期信息（user-defined-training-plan 2.4；None=非终测或未追加）
+    cycle_appended: dict[str, Any] | None = None
+
+
+def question_pool(
+    training_id: int, *, today: date | None = None, conn: sqlite3.Connection | None = None
+) -> list[dict[str, Any]]:
+    """可抽题的池子：题库里**冷却期已过**的题（冷却期内的近期原题不得进池，ADR-0016）。"""
+    return plan_service.drawable_questions(training_id, today=today, conn=conn)
+
+
+def pick_blueprints(pool: list[dict[str, Any]], *, size: int = QUIZ_SIZE) -> list[dict[str, Any]]:
+    """选题：先保证**知识点覆盖**（每个知识点最多一题），再按练过次数补足。"""
+    if size <= 0 or not pool:
+        return []
+    covered: set[str] = set()
+    picked: list[dict[str, Any]] = []
+    for row in sorted(pool, key=lambda item: -int(item.get("practiced_count") or 0)):
+        point = str(row.get("knowledge_point") or "")
+        if point and point in covered:
+            continue
+        picked.append(row)
+        if point:
+            covered.add(point)
+        if len(picked) >= size:
+            return picked
+    # 知识点不够时，用剩余的题补足
+    for row in sorted(pool, key=lambda item: -int(item.get("practiced_count") or 0)):
+        if len(picked) >= size:
+            break
+        if row not in picked:
+            picked.append(row)
+    return picked[:size]
+
+
+def build_questions(
+    blueprints: list[dict[str, Any]], training_id: int | None = None
+) -> tuple[list[QuizQuestion], bool]:
+    """把蓝本题变成测验题：优先 LLM 变式，失败则退回原题（标记 is_variant=False）。"""
+    if not blueprints:
+        return [], False
+    payload = [
+        {
+            "item_key": str(row.get("item_key")),
+            "knowledge_point": str(row.get("knowledge_point") or ""),
+            "question": str(row.get("question_text") or ""),
+            "reference_answer": str(row.get("answer_text") or ""),
+        }
+        for row in blueprints
+    ]
+    variables = {"blueprints": json.dumps(payload, ensure_ascii=False, indent=2)}
+    output: dict[str, Any] = {}
+    try:
+        result = complete(
+            "quiz_variant", variables, schema=SCHEMA_REGISTRY["quiz_variant"], training_id=training_id
+        )
+        output = result.get("output_json") or {}
+    except Exception as exc:  # LLM 不可用不该阻塞测验（失败审计由客户端写入）
+        logger.warning("build_questions: LLM unavailable (%s), falling back to banked originals", exc)
+
+    by_key = {str(row.get("item_key")): row for row in blueprints}
+    questions: list[QuizQuestion] = []
+    for raw in output.get("questions") or []:
+        key = str(raw.get("item_key") or "")
+        blueprint = by_key.get(key)
+        if blueprint is None:
+            continue
+        questions.append(
+            QuizQuestion(
+                item_key=key,
+                knowledge_point=str(blueprint.get("knowledge_point") or ""),
+                question=str(raw.get("question") or "").strip(),
+                reference_answer=str(
+                    raw.get("reference_answer") or blueprint.get("answer_text") or ""
+                ).strip(),
+                is_variant=True,
+            )
+        )
+    questions = [question for question in questions if question.question]
+    if questions:
+        return questions, True
+    # 降级：冷却期外的原题（此时已不属于"近期练过的原题"），显式标记为非变式
+    fallback = [
+        QuizQuestion(
+            item_key=str(row.get("item_key")),
+            knowledge_point=str(row.get("knowledge_point") or ""),
+            question=str(row.get("question_text") or "").strip() or "（题库里这道题没有题干）",
+            reference_answer=str(row.get("answer_text") or ""),
+            is_variant=False,
+        )
+        for row in blueprints
+    ]
+    return fallback, False
+
+
+def start_assessment(
+    training_id: int,
+    *,
+    trigger: str = "manual",
+    plan_id: int | None = None,
+    size: int = QUIZ_SIZE,
+    today: date | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> Assessment:
+    """生成一次测验批次（题目落库，等待作答）。
+
+    ``trigger='final'`` 为终测（user-defined-training-plan 2.4）：覆盖题库内全部必修项
+    （不受冷却期与默认题量限制，design D4——终测单独把关完成）。
+    """
+    if trigger not in ("scheduled", "manual", "stage_end", "final"):
+        raise ValueError(f"invalid trigger: {trigger!r}")
+    effective_today = today or local_today()
+    active = _connect(conn)
+    own = conn is None
+    try:
+        if trigger == "final":
+            pool = plan_service.drawable_questions(
+                training_id, today=effective_today, conn=active, include_cooldown=True
+            )
+            blueprints = pick_blueprints(pool, size=max(len(pool), 1))
+        else:
+            pool = question_pool(training_id, today=effective_today, conn=active)
+            blueprints = pick_blueprints(pool, size=size)
+        if not blueprints:
+            raise ValueError(
+                "题库里还没有可抽的题：练过的题要过 14 天冷却期才能进入测验（ADR-0016）"
+            )
+        questions, _used_llm = build_questions(blueprints, training_id=training_id)
+        cursor = active.execute(
+            "INSERT INTO assessments (training_id, plan_id, trigger, status, question_count, "
+            "created_at) VALUES (?, ?, ?, 'in_progress', ?, ?)",
+            (int(training_id), plan_id, trigger, len(questions), _now()),
+        )
+        assessment_id = int(cursor.lastrowid)
+        active.executemany(
+            "INSERT INTO assessment_items (assessment_id, ordinal, item_key, knowledge_point, "
+            "question, reference_answer, is_variant, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    assessment_id,
+                    index,
+                    question.item_key,
+                    question.knowledge_point or None,
+                    question.question,
+                    question.reference_answer or None,
+                    1 if question.is_variant else 0,
+                    _now(),
+                )
+                for index, question in enumerate(questions, start=1)
+            ],
+        )
+        if own:
+            active.commit()
+        row = active.execute("SELECT * FROM assessments WHERE id = ?", (assessment_id,)).fetchone()
+        logger.info(
+            "start_assessment: training %s -> assessment %s (%d 题, trigger=%s)",
+            training_id,
+            assessment_id,
+            len(questions),
+            trigger,
+        )
+    finally:
+        if own:
+            active.close()
+    return Assessment.from_row(row)
+
+
+def load_assessment(
+    assessment_id: int, *, conn: sqlite3.Connection | None = None
+) -> Assessment | None:
+    active = _connect(conn)
+    own = conn is None
+    try:
+        row = active.execute(
+            "SELECT * FROM assessments WHERE id = ?", (int(assessment_id),)
+        ).fetchone()
+    finally:
+        if own:
+            active.close()
+    return Assessment.from_row(row) if row else None
+
+
+def load_items(
+    assessment_id: int, *, conn: sqlite3.Connection | None = None
+) -> list[AssessmentItem]:
+    active = _connect(conn)
+    own = conn is None
+    try:
+        rows = active.execute(
+            "SELECT * FROM assessment_items WHERE assessment_id = ? ORDER BY ordinal",
+            (int(assessment_id),),
+        ).fetchall()
+    finally:
+        if own:
+            active.close()
+    return [AssessmentItem.from_row(row) for row in rows]
+
+
+def latest_assessment(
+    training_id: int, *, conn: sqlite3.Connection | None = None
+) -> Assessment | None:
+    active = _connect(conn)
+    own = conn is None
+    try:
+        row = active.execute(
+            "SELECT * FROM assessments WHERE training_id = ? ORDER BY id DESC LIMIT 1",
+            (int(training_id),),
+        ).fetchone()
+    finally:
+        if own:
+            active.close()
+    return Assessment.from_row(row) if row else None
+
+
+def pending_quiz_plan(
+    training_id: int, *, today: date | None = None, conn: sqlite3.Connection | None = None
+) -> dict[str, Any] | None:
+    """今天（或已累计到今天的）测验任务计划项。"""
+    effective_today = today or local_today()
+    active = _connect(conn)
+    own = conn is None
+    try:
+        row = active.execute(
+            "SELECT * FROM plan_items WHERE training_id = ? AND kind = 'assessment' "
+            "AND status = 'planned' AND due_date <= ? ORDER BY due_date LIMIT 1",
+            (int(training_id), effective_today.isoformat()),
+        ).fetchone()
+    finally:
+        if own:
+            active.close()
+    return dict(row) if row else None
+
+
+def save_answers(
+    assessment_id: int, answers: dict[int, str], *, conn: sqlite3.Connection | None = None
+) -> int:
+    """保存用户作答（item_id → 答案文本）。"""
+    active = _connect(conn)
+    own = conn is None
+    try:
+        updated = 0
+        for item_id, answer in answers.items():
+            active.execute(
+                "UPDATE assessment_items SET user_answer = ? WHERE id = ? AND assessment_id = ?",
+                (str(answer or "").strip(), int(item_id), int(assessment_id)),
+            )
+            updated += 1
+        if own:
+            active.commit()
+    finally:
+        if own:
+            active.close()
+    return updated
+
+
+def _question_meta(
+    conn: sqlite3.Connection | None, training_id: int | None, item_key: str
+) -> tuple[str, str | None]:
+    """取题库里的题型与选项 JSON（客观题分流的数据来源）。"""
+    if training_id is None:
+        return "qa", None
+    active = _connect(conn)
+    own = conn is None
+    try:
+        row = active.execute(
+            "SELECT question_type, options FROM question_bank WHERE training_id = ? AND item_key = ?",
+            (int(training_id), str(item_key)),
+        ).fetchone()
+    finally:
+        if own:
+            active.close()
+    if row is None:
+        return "qa", None
+    return (str(row["question_type"] or "qa"), row["options"])
+
+
+def grade_with_llm(
+    assessment_id: int, *, conn: sqlite3.Connection | None = None
+) -> bool:
+    """用 LLM **逐条判定要点**，再由规则层算分与达标。
+
+    模型只负责"这条要点答到没有"的语义判断；是否通过由 `grading_service` 按
+    覆盖率 × 正确性 + 必答否决 + 阈值（0.8）确定性地算出来。
+    返回是否判分成功（失败时由用户自评兜底）。
+    """
+    from src.services.grading_service import (
+        correct_key_of,
+        grade_objective,
+        grade_question,
+        load_points,
+        parse_options,
+    )
+
+    assessment = load_assessment(assessment_id, conn=conn)
+    items = load_items(assessment_id, conn=conn)
+    payload = []
+    for item in items:
+        specs = (
+            load_points(int(assessment.training_id), item.item_key, conn=conn)
+            if assessment
+            else []
+        )
+        qtype, options_json = _question_meta(
+            conn, int(assessment.training_id) if assessment else None, item.item_key
+        )
+        payload.append(
+            {
+                "item_key": item.item_key,
+                "question": item.question,
+                "reference_answer": item.reference_answer or "",
+                "answer": item.user_answer or "",
+                "question_type": qtype,
+                "options": parse_options(options_json),
+                "points": [
+                    {
+                        "point_id": spec.point_id,
+                        "text": spec.text,
+                        "weight": spec.weight,
+                        "is_required": spec.required,
+                    }
+                    for spec in specs
+                ],
+            }
+        )
+    variables = {
+        "items": json.dumps(payload, ensure_ascii=False, indent=2),
+        # 整场测验按训练级注入记忆背景（多题无法锚定单个 item_key）
+        "memory_block": (
+            memory_service.grade_memory_block(int(assessment.training_id), conn=conn)
+            if assessment
+            else ""
+        ),
+    }
+    # 判分一致性（change grading-consistency）：整场测验以完整 items 载荷为缓存键，
+    # 同卷同答复用模型判定；记忆背景不进键（口径约定它不改判定）。
+    prompt_version = PROMPT_REGISTRY["quiz_grade"][1]
+    key = grading_cache.cache_key(DEEPSEEK_MODEL, prompt_version, variables["items"], None, None, None)
+    output: dict[str, Any] = {}
+    cached = grading_cache.lookup(key)
+    if cached is not None:
+        output = cached
+    else:
+        try:
+            result = complete(
+                "quiz_grade",
+                variables,
+                schema=SCHEMA_REGISTRY["quiz_grade"],
+                training_id=int(assessment.training_id) if assessment else None,
+            )
+            output = result.get("output_json") or {}
+        except Exception as exc:
+            # 失败审计由客户端写入 llm_calls；判分不可用时走用户自评
+            logger.warning("grade_with_llm: LLM unavailable (%s), 需要用户自评", exc)
+            return False
+        if output:
+            grading_cache.store(
+                key,
+                prompt_version,
+                DEEPSEEK_MODEL,
+                output,
+                tokens_in=result.get("tokens_in", 0),
+                tokens_out=result.get("tokens_out", 0),
+                latency_ms=result.get("latency_ms", 0),
+            )
+
+    verdicts: dict[str, dict[str, Any]] = {}
+    for raw in output.get("results") or []:
+        verdicts[str(raw.get("item_key") or "")] = raw
+    if not verdicts:
+        return False
+
+    active = _connect(conn)
+    own = conn is None
+    try:
+        for item in items:
+            entry = verdicts.get(item.item_key)
+            if entry is None:
+                continue
+            # 客观题分流（2026-11-15 修复）：choice/fill 用确定性判分覆盖模型意见，
+            # 不再让 LLM 对客观题做语义判断（ADR-0022 硬约束）。
+            qtype, options_json = _question_meta(
+                conn, int(assessment.training_id) if assessment else None, item.item_key
+            )
+            obj = grade_objective(
+                qtype,
+                item.user_answer,
+                expected=item.reference_answer,
+                correct_key=correct_key_of(options_json),
+                options=parse_options(options_json),
+            )
+            if obj is not None:
+                verdict = "pass" if obj.passed else "fail"
+                reason = obj.reason
+                item_score = round(float(obj.score), 4)
+            else:
+                point_verdicts = {
+                    str(raw_point.get("point_id")): str(raw_point.get("verdict"))
+                    for raw_point in (entry.get("point_verdicts") or [])
+                }
+                specs = (
+                    load_points(int(assessment.training_id), item.item_key, conn=conn)
+                    if assessment
+                    else []
+                )
+                if specs:
+                    grade = grade_question(
+                        "qa",
+                        answer=item.user_answer,
+                        points=specs,
+                        point_verdicts=point_verdicts,
+                    )
+                    verdict = "pass" if grade.passed else "fail"
+                    reason = grade.reason
+                    item_score = grade.score
+                else:
+                    # 没有要点清单的历史题：退回旧的二元口径，不伪造分数
+                    verdict = "pass" if entry.get("verdict") == "pass" else "fail"
+                    reason = str(entry.get("reason") or "")
+                    item_score = None
+            active.execute(
+                "UPDATE assessment_items SET verdict = ?, reason = ?, score = ? WHERE id = ?",
+                (verdict, reason, item_score, item.id),
+            )
+        if own:
+            active.commit()
+    finally:
+        if own:
+            active.close()
+    return True
+
+
+def save_manual_verdicts(
+    assessment_id: int, verdicts: dict[int, str], *, conn: sqlite3.Connection | None = None
+) -> int:
+    """用户自评兜底（LLM 不可用时）：标记每道题对错，并注明来源是自评。"""
+    active = _connect(conn)
+    own = conn is None
+    try:
+        updated = 0
+        for item_id, verdict in verdicts.items():
+            if verdict not in ("pass", "fail"):
+                continue
+            active.execute(
+                "UPDATE assessment_items SET verdict = ?, reason = ? WHERE id = ? "
+                "AND assessment_id = ?",
+                (verdict, "自评（LLM 判分不可用）", int(item_id), int(assessment_id)),
+            )
+            updated += 1
+        if own:
+            active.commit()
+    finally:
+        if own:
+            active.close()
+    return updated
+
+
+def _extra_round(
+    active: sqlite3.Connection, training_id: int, item_key: str, *, today: date
+) -> bool:
+    """给某道题追加一轮补练（测验未通过的"回退重练"）。"""
+    row = active.execute(
+        "SELECT COALESCE(MAX(round_index), 0) AS max_round FROM plan_items "
+        "WHERE training_id = ? AND item_key = ?",
+        (int(training_id), str(item_key)),
+    ).fetchone()
+    next_round = int(row["max_round"] or 0) + 1
+    due = (today + timedelta(days=1)).isoformat()
+    minutes = active.execute(
+        "SELECT i.item_type FROM training_items i "
+        "JOIN path_stages s ON s.id = i.stage_id "
+        "JOIN training_paths p ON p.id = s.path_id "
+        "WHERE p.training_id = ? AND i.item_key = ? "
+        "ORDER BY (p.status = 'confirmed') DESC, p.version DESC LIMIT 1",
+        (int(training_id), str(item_key)),
+    ).fetchone()
+    planned = plan_service.TYPE_MINUTES.get(
+        str(minutes["item_type"] if minutes else ""), 15
+    )
+    cursor = active.execute(
+        "INSERT OR IGNORE INTO plan_items (training_id, item_key, round_index, kind, due_date, "
+        "anchor_date, original_date, status, planned_minutes, reason, created_at) "
+        "VALUES (?, ?, ?, 'train', ?, ?, ?, 'planned', ?, 'quiz_failed', ?)",
+        (int(training_id), str(item_key), next_round, due, due, due, planned, _now()),
+    )
+    return cursor.rowcount > 0
+
+
+def _overall_quiz_score(
+    conn: sqlite3.Connection, assessment_id: int
+) -> float | None:
+    """整场评分：按题型权重聚合各题得分；没有分数时返回 None。"""
+    from src.services.grading_service import pair_weighted_score
+
+    rows = conn.execute(
+        "SELECT question_type, score FROM assessment_items WHERE assessment_id = ?",
+        (int(assessment_id),),
+    ).fetchall()
+    return pair_weighted_score(
+        [(str(row["question_type"] or "qa"), row["score"]) for row in rows]
+    )
+
+
+def finish_assessment(
+    assessment_id: int,
+    *,
+    pass_ratio: float = QUIZ_PASS_RATIO,
+    today: date | None = None,
+    graded_by: str = "llm",
+    conn: sqlite3.Connection | None = None,
+) -> QuizResult:
+    """结算测验：算成绩、写达标与作答记录、未通过则追加补练轮次。"""
+    effective_today = today or local_today()
+    active = _connect(conn)
+    own = conn is None
+    try:
+        assessment_row = active.execute(
+            "SELECT * FROM assessments WHERE id = ?", (int(assessment_id),)
+        ).fetchone()
+        if assessment_row is None:
+            raise ValueError(f"assessment not found: {assessment_id}")
+        training_id = int(assessment_row["training_id"])
+        items = load_items(assessment_id, conn=active)
+        total = len(items)
+        passed_items = [item for item in items if item.verdict == "pass"]
+        failed_items = [item for item in items if item.verdict != "pass"]
+        # 整场评分：按题型加权（客观 0.4 / 主观 0.6）聚合单题得分；
+        # 历史题没有分数时退回"通过比例"，不伪造分数
+        weighted = _overall_quiz_score(active, assessment_id)
+        score = (
+            weighted
+            if weighted is not None
+            else ((len(passed_items) / total) if total else 0.0)
+        )
+        passed = bool(total) and score >= pass_ratio
+
+        active.execute(
+            "UPDATE assessments SET status = 'completed', score = ?, passed = ?, completed_at = ? "
+            "WHERE id = ?",
+            (score, 1 if passed else 0, _now(), int(assessment_id)),
+        )
+        if own:
+            active.commit()
+
+        # 测验结果也进入作答记录：客观通道要把测验算进去
+        for item in items:
+            attempt_service.record_attempt(
+                training_id,
+                item.item_key,
+                "pass" if item.verdict == "pass" else "fail",
+                source="quiz",
+                note=f"测验 #{assessment_id}",
+                answer_text=item.user_answer or None,
+                conn=active,
+            )
+            if item.verdict == "pass":
+                attempt_service.mark_mastered_if_ready(training_id, item.item_key, conn=active)
+
+        extra = 0
+        cycle_appended: dict[str, Any] | None = None
+        trigger = str(assessment_row["trigger"] or "")
+        mode_row = active.execute(
+            "SELECT schedule_mode FROM trainings WHERE id = ?", (training_id,)
+        ).fetchone()
+        is_session_mode = bool(mode_row) and str(mode_row["schedule_mode"] or "") == "session_ratio"
+        if trigger == "final" and is_session_mode:
+            # 终测完成门（user-defined-training-plan 2.4 / design D4）：
+            # 通过 → completed；不通过 → 追加一轮同规格会话周期（已稳定项进已知巩固池）
+            if passed:
+                active.execute(
+                    "UPDATE trainings SET status = 'completed', last_active_at = ? "
+                    "WHERE id = ? AND status IN ('confirmed', 'active', 'paused')",
+                    (_now(), training_id),
+                )
+                logger.info("finish_assessment: final passed → training %s completed", training_id)
+            else:
+                cycle_appended = plan_service.append_session_cycle(training_id, conn=active)
+        else:
+            for item in failed_items:
+                if _extra_round(active, training_id, item.item_key, today=effective_today):
+                    extra += 1
+        if assessment_row["plan_id"]:
+            plan_service.complete_tasks(
+                [int(assessment_row["plan_id"])], completed=True, today=effective_today, conn=active
+            )
+        if own:
+            active.commit()
+    finally:
+        if own:
+            active.close()
+
+    return QuizResult(
+        assessment_id=int(assessment_id),
+        training_id=training_id,
+        question_count=total,
+        score=score,
+        passed=passed,
+        failed_items=[
+            {"item_id": item.id, "knowledge_point": item.knowledge_point, "reason": item.reason}
+            for item in failed_items
+        ],
+        extra_rounds=extra,
+        graded_by=graded_by,
+        cycle_appended=cycle_appended,
+    )
+
+
+__all__ = [
+    "QUIZ_PASS_RATIO",
+    "QUIZ_SIZE",
+    "QuizQuestion",
+    "QuizResult",
+    "build_questions",
+    "finish_assessment",
+    "grade_with_llm",
+    "latest_assessment",
+    "load_assessment",
+    "load_items",
+    "pending_quiz_plan",
+    "pick_blueprints",
+    "question_pool",
+    "save_answers",
+    "save_manual_verdicts",
+    "start_assessment",
+]

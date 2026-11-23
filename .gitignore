@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+web/node_modules
+# Streamlit
+.streamlit/secrets.toml
+
+# 测试产物
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 训练数据（不提交）
+data/trainer.db
+data/trainer.db-wal
+data/trainer.db-shm
+data/test_*.db
+data/test_*.db-*
+training_*/
+data/trainings_e2e/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 临时文件
+*.log
+tmp/
+.env
+.env.local
+
+# 工具本地状态（可重建，不入库）
+.slim/
+
+# 个人求职材料（仅本地保留，不入公开仓）
+docs/简历项目包装与深挖问答.md
+docs/项目现状与改进方向.md
+workspace/record/20260913_docs_简历项目包装与深挖问答.md
+workspace/record/20260913_docs_项目现状与改进方向.md
+workspace/record/简历项目包装与深挖问答.md
+workspace/record/项目现状与改进方向.md
+
+# Obsidian 本地编辑状态（每台机器各不相同）
+workspace/.obsidian/
+web/dist

@@ -1,0 +1,86 @@
+# 20261015 feat 判分按题型分流与要点评分（数据层 + 判分）
+
+## 变更摘要
+
+为 OpenSpec change `learner-memory-and-grading` 落地前两个阶段：
+
+1. **数据层（tasks 1.1—1.4）**：`question_bank` 增 `question_type` / `options`；
+   新增 `question_points`（题目要点清单）；`practice_attempts` 增 `score` / `point_results`；
+   `assessment_items` 增 `question_type`。同步补了可重复执行的迁移。
+2. **判分（tasks 2.1—2.4）**：新增 `src/services/grading_service.py`，按题型分流——
+   选择题、填空题走确定性判分（不调用大模型），主观题按「覆盖率 × 正确性」给分并输出缺失/错误要点，
+   必答要点缺失一票否决；判分结果可写回 `practice_attempts`。
+
+## 影响范围
+
+- 数据库：新增 1 张表与 6 个字段，均为向后兼容的加法变更；老库迁移后 `question_type` 默认 `qa`。
+- 判分：新增独立模块，**尚未替换既有 `quiz_service` 的判分路径**，因此现有行为不变。
+- 未新增任何大模型调用；客观题路径经测试证明零模型调用。
+
+## 相关文件
+
+- `src/db/tables.sql`（表结构）
+- `src/db/migrate.py`（`_GRADING_COLUMNS` / `_ensure_question_points`）
+- `src/services/grading_service.py`（新增）
+- `tests/test_grading_service.py`（新增，12 条用例）
+- `workspace/decisions/ADR-0022-判分按题型分流与要点评分.md`（新增）
+- `workspace/evidence/20261015-判分分流与要点评分.md`（新增）
+
+## 验证
+
+- `uv run pytest -q` → 228 passed, 1 skipped, 30 subtests passed（基线 216 passed）
+- `uv run pytest -q tests/test_grading_service.py` → 12 passed
+
+## 关联 OpenSpec change
+
+`learner-memory-and-grading` —— 已完成阶段 1 与阶段 2 的 2.1—2.4；2.5 与后续阶段待做。
+
+## 补记（同日）
+
+用户敲定三个产品参数，已落到代码与 ADR：
+
+- 达标阈值 `DEFAULT_PASS_THRESHOLD = 0.8`；
+- 整场评分权重：客观题 `0.4` / 主观题 `0.6`（同日修正过方向），新增 `type_weight()` 与 `overall_score()` 两个纯函数；
+- 必答要点由 LLM 建议、人工可改（落在阶段 3 的出题链路）。
+
+**依赖发现**：2.5 的接线无法独立完成——`quiz_service` 目前直接采信 LLM 给出的 pass/fail，
+要改走要点评分必须先让题目带要点清单、并让判分 prompt 产出逐条判定。因此 2.5 应排在 3.1 / 3.3 之后，
+已在 change 的 tasks.md 中注明。
+
+验证：`uv run pytest -q tests/test_grading_service.py` → 14 passed。
+
+## 补记二（2026-10-15，阶段 3 与 2.5 收口）
+
+- **阶段 3**：出题 schema/prompt 新增 `question_type` / `options` / `points`；
+  新增 `question_service`（出题校验 + 要点落库），选择题干扰项若在资料原文中找不到依据即拒绝落库。
+- **2.5 收口**：`QUIZ_GRADE_PROMPT` 升到 v1.1.0，模型改为**逐条输出要点四态判定**；
+  `grade_with_llm` 把逐条判定交给 `grading_service` 算分与达标（阈值 0.8 + 必答否决），
+  写入 `assessment_items.verdict` 的即新口径；"连续 2 次"沿用既有管线。
+  为兼容历史题（无要点清单），`QUIZ_GRADE_SCHEMA` 同时保留旧的 `verdict` 字段，代码在该情况下走旧口径且不伪造分数。
+- 修正整场评分权重为客观题 0.4 / 主观题 0.6。
+
+验证：判分 + 出题 + 测验 + 作答 + 达标 + 计划六个测试文件 → 66 passed。
+
+## 补记三（2026-10-15，阶段 4 记忆模块）
+
+- 新增 `src/services/memory_service.py`：错因推导（纯函数）、薄弱点画像（纯 SQL）、
+  错因聚合、历史错因摘要、上下文渲染（含 token 规模对比）、错题分析开关与存储。
+- 数据层：`practice_attempts` 增 `mistake_reasons`；新增 `mistake_analysis` 与 `app_settings` 两张表，
+  迁移可重复执行。
+- 关键取舍：错因用**固定枚举**而非自由文本（可聚合）；错因由要点判定**确定性推导**（零模型调用）；
+  错题分析是**用户开关且默认关闭**，分析文本单独存储、不覆盖规则错因。
+- 任务 4.3（整场评分与解析改用 memory_service）依赖阶段 5/6，暂未接线，已在 tasks.md 注明。
+
+验证：记忆 + 判分 + 出题 + 作答 + 测验 + 计划 + 达标七个测试文件 → 75 passed。
+
+## 补记四（2026-10-15，阶段 5—8）
+
+- **5.1/5.2 整场评分**：`assessment_items` 增 `score` 列并由判分写入；
+  `finish_assessment` 改为按题型加权（客观 0.4 / 主观 0.6）算整场分，历史题无分数时退回通过比例。
+  综合反馈的素材由 `memory_service.render_context` 提供（薄弱知识点 / 错因分布 / 最近错因）。
+- **6.1/6.2 按需解析**：新增 `explanation_service` 与 `explanations` 表；
+  解析基于题目关联的资料切片，片段不足时提示依据不足；prompt `explanation` v1.0.0、schema 同步登记。
+- **7.1 自适应配比**：`memory_service.recommended_type_mix` 按"均分缺口 × 作答次数"归一化出题型配比，零模型调用。
+- **8 收尾**：全量 `uv run pytest -q` → **253 passed, 1 skipped, 30 subtests passed**（基线 216）；
+  证据回填 `workspace/evidence/20261015-判分分流与要点评分.md`。
+- **明确未做**：判分一致性（需人工标注 20—30 题）与重复判分稳定性——**在完成前不得对外声称这两项数据**。

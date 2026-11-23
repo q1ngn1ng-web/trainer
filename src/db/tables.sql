@@ -1,0 +1,656 @@
+CREATE TABLE IF NOT EXISTS trainings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic TEXT NOT NULL,
+    status TEXT DEFAULT 'draft' CHECK (status IN ('created', 'draft', 'pending_confirm', 'confirmed', 'active', 'paused', 'completed', 'archived', 'failed')),
+    goal_json TEXT,
+    goal_confirmed_at DATETIME,
+    clarification_rounds INTEGER DEFAULT 0,
+    keywords TEXT,
+    must_cover_count INTEGER DEFAULT 2,
+    forbidden TEXT,
+    directory TEXT,
+    baseline_score REAL DEFAULT 0,
+    baseline_level TEXT CHECK (baseline_level IS NULL OR baseline_level IN ('high', 'mid', 'low')),
+    targets TEXT,
+    review_items TEXT,
+    pretrain_checklist TEXT,
+    schedule TEXT,
+    materials TEXT,
+    current_week INTEGER DEFAULT 1,
+    last_review_at DATETIME,
+    -- 账户归属（personal-auth-tests 随 schema 对齐补入；与生产库一致）
+    org_id INTEGER,
+    owner_user_id INTEGER,
+    -- 分享溯源（change plan-sharing）：NULL = 原创训练；非 NULL = 从分享拉取/推送的独立副本
+    shared_from_training_id INTEGER,
+    shared_by_user_id INTEGER,
+    -- 可见性三档（change content-visibility）：private 仅自己 / specific 指定成员 / public 组织内全部
+    visibility TEXT DEFAULT 'private',
+    -- 排期模式（change user-defined-training-plan）：legacy_v21=ADR-0021 固定五轮（存量默认，不迁移）；
+    -- session_ratio=用户自定义节奏（horizon×session_count，配比控制器组会话）
+    schedule_mode TEXT NOT NULL DEFAULT 'legacy_v21',
+    created_at DATETIME NOT NULL,
+    last_active_at DATETIME
+);
+
+-- 训练可见性的指定成员授权（change content-visibility）
+CREATE TABLE IF NOT EXISTS training_shares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    created_by INTEGER NOT NULL,
+    created_at DATETIME NOT NULL,
+    UNIQUE (training_id, user_id),
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+-- 资料可见性的指定成员授权（change content-visibility）
+CREATE TABLE IF NOT EXISTS source_shares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    created_by INTEGER NOT NULL,
+    created_at DATETIME NOT NULL,
+    UNIQUE (source_id, user_id),
+    FOREIGN KEY (source_id) REFERENCES sources(id)
+);
+
+-- 训练计划分享链接（change plan-sharing）：组织内成员凭 token 预览并拉取独立副本
+CREATE TABLE IF NOT EXISTS share_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    created_by INTEGER NOT NULL,
+    -- 开放级别（change share-gate）：org=本组织在册成员（默认，存量行为不变）；
+    -- anyone=任何登录用户（含跨组织与无组织个人）可预览并导入
+    open_level TEXT NOT NULL DEFAULT 'org' CHECK (open_level IN ('org', 'anyone')),
+    created_at DATETIME NOT NULL,
+    revoked_at DATETIME,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE TABLE IF NOT EXISTS daily_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    log_date TEXT NOT NULL,
+    total_tasks INTEGER DEFAULT 0,
+    completed_count INTEGER DEFAULT 0,
+    recall_questions_total INTEGER DEFAULT 0,
+    recall_questions_correct INTEGER DEFAULT 0,
+    recall_success_rate REAL,
+    three_reflections TEXT,
+    reflection_submitted_at DATETIME,
+    created_at DATETIME NOT NULL,
+    UNIQUE (training_id, log_date),
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE TABLE IF NOT EXISTS baseline_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    baseline_score REAL NOT NULL,
+    dimension_scores TEXT,
+    recorded_at DATETIME NOT NULL,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER,
+    call_purpose TEXT NOT NULL,
+    prompt_name TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_text TEXT NOT NULL,
+    output_text TEXT,
+    output_json TEXT,
+    validation_result TEXT,
+    retry_count INTEGER DEFAULT 0,
+    latency_ms INTEGER NOT NULL,
+    tokens_in INTEGER NOT NULL,
+    tokens_out INTEGER NOT NULL,
+    failure_reason TEXT,
+    fallback_used INTEGER DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE TABLE IF NOT EXISTS review_archives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    week_start TEXT NOT NULL,
+    metrics TEXT,
+    llm_suggestions TEXT,
+    user_action TEXT CHECK (user_action IN ('confirmed', 'skipped')),
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE TABLE IF NOT EXISTS daily_log_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    daily_log_id INTEGER NOT NULL,
+    task_type TEXT CHECK (task_type IN ('review', 'new', 'recall')),
+    task_ref TEXT,
+    completed INTEGER DEFAULT 0,
+    completed_at DATETIME,
+    is_required INTEGER DEFAULT 1,
+    FOREIGN KEY (daily_log_id) REFERENCES daily_logs(id)
+);
+
+CREATE TABLE IF NOT EXISTS sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('ai_generated', 'user_upload', 'user_paste', 'web_url')),
+    title TEXT NOT NULL,
+    origin TEXT,
+    origin_url TEXT,
+    fetched_at DATETIME,
+    snapshot_text TEXT,
+    org_id INTEGER,
+    department_id INTEGER,
+    scope TEXT DEFAULT 'private' CHECK (scope IN ('private', 'specific', 'public')),
+    enabled INTEGER DEFAULT 1,
+    checksum TEXT,
+    parse_status TEXT DEFAULT 'pending' CHECK (parse_status IN ('pending', 'ok', 'failed', 'unsupported')),
+    parse_error TEXT,
+    imported_at DATETIME NOT NULL,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE TABLE IF NOT EXISTS source_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    heading_path TEXT,
+    text TEXT NOT NULL,
+    char_count INTEGER NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES sources(id)
+);
+
+-- 全文索引：用 trigram 分词，中文才能按子串命中（unicode61 会把整句当成一个词）
+CREATE VIRTUAL TABLE IF NOT EXISTS source_chunks_fts USING fts5(
+    text,
+    heading_path,
+    content='source_chunks',
+    content_rowid='id',
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS source_chunks_ai AFTER INSERT ON source_chunks BEGIN
+    INSERT INTO source_chunks_fts(rowid, text, heading_path)
+    VALUES (new.id, new.text, new.heading_path);
+END;
+
+CREATE TRIGGER IF NOT EXISTS source_chunks_ad AFTER DELETE ON source_chunks BEGIN
+    INSERT INTO source_chunks_fts(source_chunks_fts, rowid, text, heading_path)
+    VALUES ('delete', old.id, old.text, old.heading_path);
+END;
+
+CREATE TRIGGER IF NOT EXISTS source_chunks_au AFTER UPDATE ON source_chunks BEGIN
+    INSERT INTO source_chunks_fts(source_chunks_fts, rowid, text, heading_path)
+    VALUES ('delete', old.id, old.text, old.heading_path);
+    INSERT INTO source_chunks_fts(rowid, text, heading_path)
+    VALUES (new.id, new.text, new.heading_path);
+END;
+
+CREATE TABLE IF NOT EXISTS edge_assessments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    knowledge_point TEXT NOT NULL,
+    heading_path TEXT,
+    difficulty INTEGER NOT NULL,
+    question TEXT NOT NULL,
+    reference_answer TEXT,
+    answer TEXT,
+    verdict TEXT CHECK (verdict IS NULL OR verdict IN ('pass', 'fail', 'unknown')),
+    state TEXT CHECK (state IS NULL OR state IN ('mastered', 'edge', 'unreached')),
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trainings_last_active_at ON trainings(last_active_at);
+CREATE INDEX IF NOT EXISTS idx_daily_logs_training_date ON daily_logs(training_id, log_date);
+CREATE INDEX IF NOT EXISTS idx_baseline_history_training ON baseline_history(training_id, recorded_at);
+CREATE INDEX IF NOT EXISTS yidx_llm_calls_purpose ON llm_calls(call_purpose);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_prompt_version ON llm_calls(prompt_name, prompt_version);
+CREATE INDEX IF NOT EXISTS idx_review_archives_training_week ON review_archives(training_id, week_start);
+CREATE INDEX IF NOT EXISTS idx_sources_training ON sources(training_id);
+CREATE INDEX IF NOT EXISTS idx_source_chunks_source ON source_chunks(source_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_edge_assessments_training ON edge_assessments(training_id, knowledge_point);
+
+CREATE TABLE IF NOT EXISTS training_paths (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'confirmed', 'superseded')),
+    mode TEXT DEFAULT 'mastery' CHECK (mode IN ('coverage', 'mastery')),
+    horizon_weeks INTEGER,
+    weekly_frequency INTEGER,
+    daily_budget_minutes INTEGER,
+    budget_minutes INTEGER,
+    planned_minutes INTEGER,
+    created_at DATETIME NOT NULL,
+    confirmed_at DATETIME,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE TABLE IF NOT EXISTS path_stages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    goal TEXT,
+    estimated_minutes INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'locked' CHECK (status IN ('locked', 'active', 'completed')),
+    FOREIGN KEY (path_id) REFERENCES training_paths(id)
+);
+
+CREATE TABLE IF NOT EXISTS training_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    item_key TEXT,
+    item_type TEXT CHECK (item_type IN ('memory', 'comprehension', 'practice', 'prerequisite')),
+    difficulty_tier INTEGER,
+    difficulty_basis TEXT,
+    knowledge_point TEXT,
+    source_chunk_ids TEXT,
+    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'practiced', 'passed', 'failed')),
+    mastered_at DATETIME,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (stage_id) REFERENCES path_stages(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_paths_training ON training_paths(training_id, version);
+CREATE INDEX IF NOT EXISTS idx_path_stages_path ON path_stages(path_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_training_items_stage ON training_items(stage_id, ordinal);
+
+-- 训练计划：以「到期日 × 训练 × 题目 × 轮次」为一条计划项（ADR-0021）
+-- item_key 是稳定题目键，不用训练项的自增主键——路径重生成会换 id（见 design D7）
+CREATE TABLE IF NOT EXISTS plan_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    item_key TEXT NOT NULL,
+    round_index INTEGER NOT NULL,
+    kind TEXT DEFAULT 'train' CHECK (kind IN ('train', 'assessment')),
+    due_date TEXT NOT NULL,
+    anchor_date TEXT NOT NULL,
+    original_date TEXT NOT NULL,
+    status TEXT DEFAULT 'planned' CHECK (status IN ('planned', 'practiced', 'skipped')),
+    planned_minutes INTEGER DEFAULT 0,
+    practiced_at DATETIME,
+    reason TEXT,
+    -- 题目与作答（系统出题、用户作答、系统判分）
+    question TEXT,
+    reference_answer TEXT,
+    -- 出题时固化的要点清单（JSON 数组：point_id/text/weight/is_required），
+    -- 判分时只引用不再生成（与 question_points 同一约束，但按计划项内联，
+    -- 避免与 question_bank 的 item_key 键空间冲突：同一知识点每轮题目不同）
+    points TEXT,
+    -- 客观题分流：题型与选项随题固化（2026-11-15 修复——此前选项只存在于出题响应里，
+    -- 判分时丢失，选择题被当语义问答题送进 LLM）
+    question_type TEXT,
+    options TEXT,
+    answer_text TEXT,
+    verdict TEXT,
+    graded_by TEXT,
+    graded_at DATETIME,
+    created_at DATETIME NOT NULL,
+    UNIQUE (training_id, item_key, round_index),
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_items_due ON plan_items(training_id, due_date);
+CREATE INDEX IF NOT EXISTS idx_plan_items_status ON plan_items(status, due_date);
+
+-- 测验题库：练过的题在这里登记，冷却期过后才可被抽题（ADR-0016）
+CREATE TABLE IF NOT EXISTS question_bank (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    item_key TEXT NOT NULL,
+    source_chunk_ids TEXT,
+    knowledge_point TEXT,
+    item_type TEXT,
+    question_type TEXT DEFAULT 'qa',
+    options TEXT,
+    difficulty_tier INTEGER,
+    question_text TEXT,
+    answer_text TEXT,
+    practiced_count INTEGER DEFAULT 0,
+    last_practiced_at DATETIME,
+    banked_at DATETIME NOT NULL,
+    cooldown_until TEXT,
+    status TEXT DEFAULT 'active' CHECK (status IN ('active', 'retired')),
+    UNIQUE (training_id, item_key),
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_bank_drawable ON question_bank(training_id, cooldown_until);
+
+-- 题目要点清单：判分的锚点，随题固化（change learner-memory-and-grading 任务 1.2）
+-- 判分时只读取这份清单，MUST NOT 临时让模型生成要点，否则分数会漂。
+CREATE TABLE IF NOT EXISTS question_points (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    item_key TEXT NOT NULL,
+    point_id TEXT NOT NULL,
+    point_text TEXT NOT NULL,
+    weight REAL DEFAULT 1,
+    is_required INTEGER DEFAULT 0,
+    ordinal INTEGER NOT NULL,
+    created_at DATETIME NOT NULL,
+    UNIQUE (training_id, item_key, point_id),
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_question_points_item
+    ON question_points(training_id, item_key, ordinal);
+
+-- 逐次作答记录：客观表现的唯一数据源（准确率 / 连续达标都以它为准）
+-- item_key 是稳定题目键，与 plan_items / question_bank 一致
+CREATE TABLE IF NOT EXISTS practice_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    item_key TEXT NOT NULL,
+    plan_id INTEGER,
+    round_index INTEGER,
+    result TEXT NOT NULL CHECK (result IN ('pass', 'fail')),
+    -- 作答原文随尝试留档：plan_items.answer_text 会被下一次作答覆盖，
+    -- 深度解析要对比「每次怎么错的」，必须在尝试级保存原文（item-history-deep-explanation）
+    answer_text TEXT,
+    score REAL,
+    point_results TEXT,
+    mistake_reasons TEXT,
+    source TEXT DEFAULT 'self' CHECK (source IN ('self', 'quiz', 'llm', 'rule')),
+    note TEXT,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_practice_attempts_item
+    ON practice_attempts(training_id, item_key, id);
+
+-- 错题分析（可选功能，由用户开关控制；见 change learner-memory-and-grading 任务 4.6）
+-- 分析文本单独存储，MUST NOT 覆盖规则推导出的错因
+CREATE TABLE IF NOT EXISTS mistake_analysis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    item_key TEXT NOT NULL,
+    attempt_id INTEGER,
+    analysis_text TEXT NOT NULL,
+    prompt_name TEXT,
+    prompt_version TEXT,
+    model TEXT,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mistake_analysis_item
+    ON mistake_analysis(training_id, item_key, id);
+
+-- 主观题判分结果缓存（change grading-consistency）：同一（模型, prompt 版本, 题目,
+-- 参考答案, 要点清单, 作答）的模型逐条判定视为确定值，命中即复用——重判可复现、省 token。
+-- 只缓存模型语义意见，分数与达标仍由规则层实时计算。
+CREATE TABLE IF NOT EXISTS grading_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cache_key TEXT NOT NULL UNIQUE,
+    prompt_name TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    model TEXT NOT NULL,
+    output_json TEXT NOT NULL,
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL
+);
+
+-- 应用级开关（键值）。当前用于"是否开启错题分析"，避免为零散设置再开一套体系
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at DATETIME
+);
+
+-- 按需解析：用户请求时才生成，必须引用资料来源（change learner-memory-and-grading 任务 6.1—6.2）
+CREATE TABLE IF NOT EXISTS explanations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    item_key TEXT NOT NULL,
+    explanation_text TEXT NOT NULL,
+    source_refs TEXT,
+    prompt_name TEXT,
+    prompt_version TEXT,
+    model TEXT,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_explanations_item
+    ON explanations(training_id, item_key, id);
+
+-- 测验批次：每两周一次 / 用户手动触发 / 阶段末触发
+CREATE TABLE IF NOT EXISTS assessments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    plan_id INTEGER,
+    -- trigger 'final' = 终测（user-defined-training-plan）：覆盖全部必修项的完成门
+    trigger TEXT DEFAULT 'scheduled' CHECK (trigger IN ('scheduled', 'manual', 'stage_end', 'final')),
+    status TEXT DEFAULT 'in_progress' CHECK (status IN ('in_progress', 'completed')),
+    question_count INTEGER DEFAULT 0,
+    score REAL,
+    passed INTEGER,
+    created_at DATETIME NOT NULL,
+    completed_at DATETIME,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+-- 测验题目与作答：item_key 回指题库，判分结果用于回退重练
+CREATE TABLE IF NOT EXISTS assessment_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assessment_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    item_key TEXT NOT NULL,
+    knowledge_point TEXT,
+    question_type TEXT DEFAULT 'qa',
+    question TEXT NOT NULL,
+    reference_answer TEXT,
+    is_variant INTEGER DEFAULT 1,
+    user_answer TEXT,
+    verdict TEXT CHECK (verdict IS NULL OR verdict IN ('pass', 'fail')),
+    reason TEXT,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (assessment_id) REFERENCES assessments(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessments_training ON assessments(training_id, id);
+CREATE INDEX IF NOT EXISTS idx_assessment_items_assessment
+    ON assessment_items(assessment_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS learning_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    item_id INTEGER,
+    signal_type TEXT NOT NULL CHECK (signal_type IN ('too_easy', 'too_hard', 'too_much', 'too_narrow')),
+    raw_text TEXT,
+    confidence REAL,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE TABLE IF NOT EXISTS adjustment_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    item_id INTEGER,
+    signal_type TEXT,
+    action TEXT,
+    reason TEXT,
+    detail TEXT,
+    blocked INTEGER DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_signals_training ON learning_signals(training_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_adjustment_log_training ON adjustment_log(training_id, created_at);
+
+-- ============================================================
+-- 账户 / 组织 / 培训作业（2026-10 自生产库 sqlite_master 导出并规范化）
+-- 列定义与生产库逐列一致；仅补 IF NOT EXISTS、按外键依赖排序、去引号。
+-- 这 10 张表此前只在生产库存在，仓库缺 DDL 导致全新库 init-db 后注册登录不可用。
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    created_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    password_hash TEXT,
+    status TEXT DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+    created_at DATETIME NOT NULL,
+    last_login_at DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS departments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    parent_id INTEGER,
+    created_at DATETIME NOT NULL,
+    UNIQUE (org_id, name),
+    FOREIGN KEY (org_id) REFERENCES organizations(id)
+);
+
+CREATE TABLE IF NOT EXISTS memberships (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    org_id INTEGER NOT NULL,
+    department_id INTEGER,
+    -- 三档角色（change member-invite）：org_admin=组织管理员 / admin=小组管理员 / member=成员
+    -- （老值 employee/dept_manager 由迁移映射 member/admin）
+    role TEXT NOT NULL CHECK (role IN ('org_admin', 'admin', 'member')),
+    status TEXT DEFAULT 'active' CHECK (status IN ('active', 'invited', 'disabled')),
+    -- 邀请托管：invited_by=邀请人（配额归属）；admin_quota=该管理员配额（NULL=非管理员）；
+    -- admin_can_remove=该管理员是否可移除成员（默认 0）
+    invited_by INTEGER,
+    admin_quota INTEGER,
+    admin_can_remove INTEGER DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    UNIQUE (user_id, org_id),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (org_id) REFERENCES organizations(id),
+    FOREIGN KEY (department_id) REFERENCES departments(id)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    -- NULL = 个人模式登录（无组织成员资格，member-invite 取消自动进组后）
+    org_id INTEGER,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at DATETIME NOT NULL,
+    expires_at DATETIME NOT NULL,
+    last_seen_at DATETIME,
+    revoked_at DATETIME,
+    user_agent TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (org_id) REFERENCES organizations(id)
+);
+
+CREATE TABLE IF NOT EXISTS login_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at DATETIME NOT NULL,
+    used_at DATETIME,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (org_id) REFERENCES organizations(id)
+);
+
+CREATE TABLE IF NOT EXISTS roster_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    department_id INTEGER,
+    role TEXT NOT NULL CHECK (role IN ('org_admin', 'dept_manager', 'employee')),
+    status TEXT DEFAULT 'invited' CHECK (status IN ('invited', 'active', 'revoked')),
+    created_at DATETIME NOT NULL,
+    accepted_at DATETIME,
+    UNIQUE (org_id, email),
+    FOREIGN KEY (org_id) REFERENCES organizations(id),
+    FOREIGN KEY (department_id) REFERENCES departments(id)
+);
+
+CREATE TABLE IF NOT EXISTS assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    source_ids TEXT,
+    acceptance TEXT,
+    target_type TEXT CHECK (target_type IN ('all', 'department', 'user')),
+    target_value TEXT,
+    due_date TEXT,
+    status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'closed')),
+    created_by INTEGER,
+    created_at DATETIME NOT NULL,
+    published_at DATETIME,
+    FOREIGN KEY (org_id) REFERENCES organizations(id)
+);
+
+CREATE TABLE IF NOT EXISTS assignment_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    UNIQUE (assignment_id, user_id),
+    FOREIGN KEY (assignment_id) REFERENCES assignments(id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS assignment_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    training_id INTEGER,
+    received_at DATETIME NOT NULL,
+    UNIQUE (assignment_id, user_id),
+    FOREIGN KEY (assignment_id) REFERENCES assignments(id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_login_tokens_email ON login_tokens(org_id, email);
+CREATE INDEX IF NOT EXISTS idx_departments_org ON departments(org_id);
+CREATE INDEX IF NOT EXISTS idx_memberships_org ON memberships(org_id, role);
+CREATE INDEX IF NOT EXISTS idx_roster_org ON roster_entries(org_id, status);
+CREATE INDEX IF NOT EXISTS idx_assignments_org ON assignments(org_id, status);
+CREATE INDEX IF NOT EXISTS idx_assignment_targets_user ON assignment_targets(user_id);
+
+-- 学习者模型（change layered-learner-memory）：per (training_id, item_key) 的掌握度递推
+-- 与活跃误解清单。从 practice_attempts 增量更新，可全量重放重建（单一事实源仍是 attempts）。
+-- decayed_mastery 读时计算不落盘；misconceptions 为 JSON 数组
+-- [{point_id, text, reason}]，reason 取错因码（concept_confusion / key_omission）。
+CREATE TABLE IF NOT EXISTS learner_knowledge (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id INTEGER NOT NULL,
+    item_key TEXT NOT NULL,
+    knowledge_point TEXT,
+    mastery REAL NOT NULL DEFAULT 0.5,
+    misconceptions TEXT,
+    attempts_count INTEGER NOT NULL DEFAULT 0,
+    passes_count INTEGER NOT NULL DEFAULT 0,
+    last_seen_at DATETIME,
+    updated_at DATETIME NOT NULL,
+    UNIQUE (training_id, item_key),
+    FOREIGN KEY (training_id) REFERENCES trainings(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_learner_knowledge_training
+    ON learner_knowledge(training_id, last_seen_at);

@@ -1,0 +1,333 @@
+"""Prompt templates and version registry."""
+from __future__ import annotations
+
+TOPIC_VALIDATION_PROMPT: str = """你是一名严格的主题评审员。请评估用户提交的训练主题是否清晰、可训练。
+
+主题: {topic}
+描述: {description}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+1. is_valid: 主题是否清晰、可在 4-8 周内训练达成
+2. suggestions: 让主题更聚焦、可衡量的具体修改建议（数组，可为空）
+3. reason: 简要判定理由
+"""
+
+TOPIC_VALIDATION_PROMPT_VERSION: str = "v1.0.0"
+
+KEYWORD_GENERATION_PROMPT: str = """你是关键词白名单设计助手。请基于主题与描述，提炼训练期间必须覆盖的核心关键词。
+
+主题: {topic}
+描述: {description}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+1. keywords: 训练期内必须掌握的关键词数组（建议 8-15 个）
+2. must_cover_count: 每道诊断题至少应覆盖的关键词数量（建议 1-2）
+3. forbidden: 训练范围内明确禁止使用的工具或话题（如已退役的框架、跑题内容）
+"""
+
+KEYWORD_GENERATION_PROMPT_VERSION: str = "v1.0.0"
+
+BASELINE_Q_PROMPT: str = """你是一位基线诊断出题助手，需要出题来确认哟怒火的真实水平。请基于主题、描述与关键词白名单，生成 3 道前提性诊断题。
+
+主题: {topic}
+描述: {description}
+关键词白名单: {keywords}
+禁止词: {forbidden}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+1. 恰好 3 道题，questions 数组长度 = 3
+2. dimension 取值: "concept"（概念理解）/ "read"（读代码）/ "write"（写代码）三类各 1 题
+3. difficulty 取值: 1 / 2 / 3，可不完全一致
+4. 每题 question 文本必须覆盖关键词白名单中至少 1 个关键词（大小写不敏感）
+5. 每题禁止出现 forbidden 中的词
+6. reference_answer 给出可评判的参考答案要点
+"""
+
+BASELINE_Q_PROMPT_VERSION: str = "v1.0.0"
+
+BASELINE_SCORING_PROMPT: str = """你是基线诊断评分员。请根据用户对 3 道诊断题的作答，对每题给出掌握度评分，并综合判定基线档位。
+
+主题: {topic}
+题目与参考答案:
+{questions}
+用户作答:
+{answers}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+1. scores 数组按 question_idx 顺序逐题给出
+2. score 取值: "mastered"（掌握）/ "partial"（半掌握）/ "missing"（缺失）
+3. notes 给出判定依据（答对哪些点、缺哪些点）
+4. overall: 综合档位 "high"（3/3 掌握）/ "mid"（2/3 掌握且无缺失）/ "low"（任意缺失）
+5. partial_topics: 列出所有半掌握题对应的知识点
+"""
+
+BASELINE_SCORING_PROMPT_VERSION: str = "v1.0.0"
+
+WEEKLY_CALIBRATION_PROMPT: str = """你是周复盘校准裁决助手。请根据本周机械指标与基线，给出新一周的训练校准建议。
+
+主题: {topic}
+当前基线分数: {baseline_score}
+用户目标: {goal}
+本周机械指标(JSON): {metrics}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+1. baseline_score_delta: 本周基线调整量，范围 -1.0 ~ +1.0
+2. schedule_adjustment: 字典，键为主题单元名，值为 "降低密度" / "升级" / "维持"
+3. material_recommendations: 资料增减建议数组，每项含 action/ref/reason
+4. reward_refresh: 本周奖励调整建议（中文短句）
+5. next_week_focus: 下周重点内容维度（中文短句）
+"""
+
+WEEKLY_CALIBRATION_PROMPT_VERSION: str = "v1.0.0"
+
+MD_GENERATION_PROMPT: str = """你是个人训练文件生成助手。请基于主题、关键词、基线档位，生成完整训练文件包（恰好 10 个 markdown 文件）。
+
+主题: {topic}
+描述: {description}
+关键词白名单: {keywords}
+当前基线档位: {baseline_overall}
+训练单元清单: {units}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+1. files 数组恰好 10 项
+2. 文件名遵循十要素命名: 00_对象档案.md / 01_基线诊断.md / 02_单元目标.md / 03_训练日历.md / 04_复习日历.md / 05_材料清单.md / 06_闯关任务.md / 07_回忆题库.md / 08_三省模板.md / 09_复盘快照.md
+3. 每个 content 字段为该文件的完整 markdown 内容（不含围栏代码块）
+4. 内容贴合主题，引用关键词，禁止出现与训练无关的虚构数据
+"""
+
+MD_GENERATION_PROMPT_VERSION: str = "v1.0.0"
+
+PRETRAIN_CHECKLIST_PROMPT: str = """你是低基线预训练清单助手。请为基线档位为「低」的用户生成补强预训练清单。
+
+主题: {topic}
+关键词白名单: {keywords}
+薄弱知识点: {weak_topics}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+1. items 数组 5-10 项
+2. 每项 concept 是 1 个必须先掌握的基础概念
+3. materials 是该概念对应的推荐学习资料列表（书 / 文档 / 教程 / 视频名）
+4. 概念顺序按从最基础到最进阶排列
+"""
+
+PRETRAIN_CHECKLIST_PROMPT_VERSION: str = "v1.0.0"
+
+GOAL_CLARIFICATION_PROMPT: str = """你是一位学习目标澄清助手，目的是帮助用户澄清自己想学习的内容。用户会用一句话描述想训练的内容，你的任务是把这句话补全成大模型可理解可执行的目标草案。
+
+用户描述: {description}
+已知信息: {known}
+历史追问与回答: {history}
+当前追问轮次: {rounds}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+0. title: 训练标题——根据用户描述起一个简短的名字（4-16 字，如「redis 面试八股训练」「MySQL 索引专项训练」），体现主题与用途，不要句号、不要"训练计划"这类泛称
+1. draft.content: 学习内容，保留用户原话的核心表述，不要摘要式改写
+2. draft.level: 目标等级，只能取「了解 / 会用 / 熟练 / 能讲清」之一
+3. draft.acceptance: 验收标准，必须可判定。优先给量化判据（type=quantitative，配 metric 与 target，metric 取 accuracy / volume / speed / streak）；accuracy 的 target 用 0-1 的比例（如 0.8），不要写 80。给不出数字时用 type=qualitative，并给出可观察的 statement 与检查方式 check
+4. missing_fields: 仍然缺失或不合格的字段名列表
+5. follow_up_question: 只针对第一个缺失字段提一个问题；若没有缺失则为空字符串
+6. 若用户描述里已经提到训练周期、每周次数或每次时长，只把它保留在 content 里，不要追问，也不要输出成字段；训练节奏（总时长、训练次数）由界面的「训练节奏」控件收集，你不要过问
+7. 严禁在本阶段询问训练周期、每周训练次数、每次训练时长或训练总次数——这些由界面控件收集；你也 MUST NOT 在 draft 里输出这类字段
+8. 字段间自洽检查：content / level / acceptance 必须指向同一学习主题且难度匹配（例如 level=「了解」时 acceptance 不得要求「能讲清」级别的高标准）；发现互相矛盾时以 content 为准修正 level / acceptance，并在 follow_up_question 里向用户说明修正点
+9. **从第一轮起就给完整草案建议**：draft.level 与 draft.acceptance 基于用户描述直接给出你的最佳建议（MUST NOT 留空等待追问）——用户的界面卡片上会展示这些建议供其修改；已知信息里已有的值原样保留
+10. missing_fields 只列**真正缺失或不合格**的字段：有建议值的字段不算缺失（用户会在卡片上看到并自行修改）；没有缺失时 missing_fields 为空列表，follow_up_question 为空字符串
+
+你只能输出 JSON。
+"""
+
+GOAL_CLARIFICATION_PROMPT_VERSION: str = "v1.3.0"
+
+EDGE_PROBE_PROMPT: str = """你是学习诊断出题助手。用户已经确认了训练目标，并导入了自己的资料来源。
+请**只根据给定的来源内容**出题，用于判断用户对每个知识点的掌握处于哪一档，不要考资料之外的东西。
+
+训练目标: {topic}
+已确认的目的: {goal}
+知识点与来源片段:
+{knowledge_points}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+1. 每个知识点出一道题，knowledge_point 与输入里的名称一致
+2. difficulty 取 1-4：1 单点记忆 / 2 单点应用 / 3 多知识点组合 / 4 跨章节综合
+3. question 必须能用来源里的内容判定对错，不要问开放式的感想
+4. reference_answer 写清判分要点，供后续判定使用
+
+你只能输出 JSON。
+"""
+
+EDGE_PROBE_PROMPT_VERSION: str = "v1.0.0"
+
+EDGE_PROBE_GRADE_PROMPT: str = """你是答案评定助手。请判断用户的作答是否达到参考要点。
+
+训练目标: {topic}
+待评定的作答:
+{items}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+1. 逐条给出 verdict：pass（要点基本齐全）或 fail（缺失关键要点）
+2. knowledge_point 必须与输入一致
+3. reason 用一句话说明判定依据
+4. 不要宽容：漏掉关键要点即 fail
+
+你只能输出 JSON。
+"""
+
+EDGE_PROBE_GRADE_PROMPT_VERSION: str = "v1.0.0"
+
+PATH_SKELETON_PROMPT: str = """你是训练路径设计助手。用户已确认目的、导入资料、并完成了理解边缘定位。
+请给出一条可执行的训练路径骨架：投入参数 + 阶段划分 + 每个阶段的训练项。
+
+训练目的: {goal}
+理解边缘定位结果（已掌握 / 边缘 / 未达）:
+{edge_states}
+可用来源知识点:
+{knowledge_points}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+
+要求:
+1. horizon_weeks / weekly_frequency / daily_budget_minutes 是**建议值**，用户会微调；要贴合任务总工作量，不要明显超出常人可承受范围
+2. **已掌握**的知识点不要生成训练项；**边缘**的是教学重点；**未达**的必须先给一条 item_type=prerequisite 的铺垫项
+3. 每个训练项写清 knowledge_point（要与输入的来源知识点名称一致），便于回指原文
+4. difficulty 取 1-4，与 item_type 匹配：记忆性偏 1-2、理解性偏 2-3、实践性偏 3-4
+5. 不要输出具体日期——日期由调度器计算
+
+你只能输出 JSON。
+"""
+
+PATH_SKELETON_PROMPT_VERSION: str = "v1.0.0"
+
+QUIZ_VARIANT_PROMPT: str = """你是测验出题助手。下面给出若干「蓝本题」，它们都是用户练过并且已过冷却期的题。
+请为每道蓝本题生成一道**变式题**：换场景、换问法或改条件，但必须考同一个知识点、难度与原题相当。
+
+严格要求：
+1. 不能照抄原题的问法，也不要把原题的答案直接写进题干；
+2. 每道题的 `item_key` 必须与蓝本题一致（用于回退重练的归因）；
+3. 只输出 JSON，字段见 schema。
+
+蓝本题列表：
+{blueprints}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+"""
+
+QUIZ_VARIANT_PROMPT_VERSION: str = "v1.1.0"
+
+QUIZ_GRADE_PROMPT: str = """你是测验评分员。请依据参考答案，判定用户对每道题的作答是否正确。
+
+判定口径：
+1. 只判断"是否答到了参考答案里的关键点"，表述不同不影响判定；
+2. 每道题会给出带 point_id 的要点清单，你要对**每条要点**给出四态判定：`hit`（答到且正确）/ `partial`（只答了一部分）/ `wrong`（说反了，比没提到更糟）/ `missing`（完全没提）；
+3. 没有要点清单的历史题才退回整体判断：完全没答、答非所问、只重复题干 → 全部 `missing`；
+4. **证据引用**：对每条 `hit` / `partial` / `wrong` 的判定，必须在 `evidence` 里**一字不改地摘录用户作答中支持该判定的连续片段**（作答里没有就不许编）；`missing` 的 `evidence` 填空字符串；
+5. 每道题另给一句简短理由（引用用户作答里的依据）；
+6. 只输出 JSON，字段见 schema；
+7. 若给出「学习者背景」（该用户的历史错因与薄弱点），仅用于理解作答语境，**不得改变上面的判定口径**。
+
+题目与作答：
+{items}
+{memory_block}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+"""
+
+QUIZ_GRADE_PROMPT_VERSION: str = "v1.4.0"
+
+EXPLANATION_PROMPT: str = """你是题目解析助手。用户做错了这道题，请给出解析。
+
+要求：
+1. 解析必须**依据下面的资料片段**，不得使用片段之外的知识；片段不足以解释时，明确说明"依据不足"，不要编造；
+2. **有历史作答时**（attempt_history 非空）：逐次对比用户每次怎么错的，指出**重复出现的错误**与共性错因（错因标签来自规则层：关键遗漏/记忆缺失/概念混淆/表达不完整），最后给出针对这些错误的**具体改进动作**；
+3. **无历史作答时**：结构固定三段——① 正确答案是什么 ② 本次作答漏了或说错了什么 ③ 一个便于记住的提示；
+4. 语言简洁，不超过 250 字；改进动作必须可执行（例如"先复述 p1 的定义再作答"），不要空话；
+5. 只输出 JSON，字段见 schema。
+
+题目：{question}
+参考答案要点：{points}
+用户作答：{answer}
+历史作答记录（按时间正序；空表示本次是第一次作答）：
+{attempt_history}
+资料片段：
+{source_text}
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+"""
+
+EXPLANATION_PROMPT_VERSION: str = "v1.2.0"
+
+
+TRAIN_QUESTION_PROMPT: str = """你是训练出题助手。请针对给定知识点出一道**训练题**，并给出参考答案。
+
+主题：{topic}
+知识点：{knowledge_point}
+轮次：第 {round_index} 轮（共 {total_rounds} 轮）
+资料片段：
+{sample_text}
+
+要求：
+1. 题目必须能**凭上面的资料回答**，不要问资料之外的内容；
+2. 轮次越靠后越难：第 1 轮直接回忆/复述，第 2-3 轮应用与辨析，第 4-5 轮综合表达或举一反三；
+3. 参考答案写成"应包含哪些要点"，便于后续判分；
+4. **按题型出题**：`question_type` 取 choice / fill / qa 之一。定义类知识点用 fill，辨析类用 choice，理解类用 qa；
+5. **要点清单**：输出 `points`，每条含 `point_id`（p1、p2…）、`text`（这条要点是什么）、`weight`（0.5—5 的相对权重，越关键越大）、`is_required`（是否必答；由你建议，用户可改）。qa 至少 3 条；fill / choice 至少 1 条；
+6. **选择题**：输出 `options`，至少 3 个，每个含 `key`（A/B/C…）、`text`、`is_correct`，且**有且仅有一个** `is_correct` 为 true；干扰项 MUST 取自上面的资料片段，MUST NOT 编造资料里没有的说法；
+7. **填空题**：题干用连续三个下划线 `___` 标记每个空（两空就两处 `___`）；同时输出 `options` 作为**每空答案键**——每个空一项：`key` 为空序号（"1"、"2"…），`text` 为该空的标准答案（同空多个可接受写法用分号 `;` 分隔，如 `内存;基于内存`），`is_correct` 一律 true。空数与 options 项数必须一致，否则该题会被降级为问答题；
+8. 只输出 JSON，字段见 schema。
+
+请按以下 JSON Schema 严格输出（不要任何额外文字、不要 markdown 围栏、不要前后缀）:
+{schema}
+"""
+
+TRAIN_QUESTION_PROMPT_VERSION: str = "v1.2.0"
+
+
+PROMPT_REGISTRY: dict[str, tuple[str, str]] = {
+    "topic_validation": (TOPIC_VALIDATION_PROMPT, TOPIC_VALIDATION_PROMPT_VERSION),
+    "keyword_generation": (KEYWORD_GENERATION_PROMPT, KEYWORD_GENERATION_PROMPT_VERSION),
+    "baseline_q": (BASELINE_Q_PROMPT, BASELINE_Q_PROMPT_VERSION),
+    "baseline_scoring": (BASELINE_SCORING_PROMPT, BASELINE_SCORING_PROMPT_VERSION),
+    "weekly_calibration": (WEEKLY_CALIBRATION_PROMPT, WEEKLY_CALIBRATION_PROMPT_VERSION),
+    "md_generation": (MD_GENERATION_PROMPT, MD_GENERATION_PROMPT_VERSION),
+    "pretrain_checklist": (PRETRAIN_CHECKLIST_PROMPT, PRETRAIN_CHECKLIST_PROMPT_VERSION),
+    "goal_clarification": (GOAL_CLARIFICATION_PROMPT, GOAL_CLARIFICATION_PROMPT_VERSION),
+    "edge_probe": (EDGE_PROBE_PROMPT, EDGE_PROBE_PROMPT_VERSION),
+    "edge_probe_grade": (EDGE_PROBE_GRADE_PROMPT, EDGE_PROBE_GRADE_PROMPT_VERSION),
+    "path_skeleton": (PATH_SKELETON_PROMPT, PATH_SKELETON_PROMPT_VERSION),
+    "quiz_variant": (QUIZ_VARIANT_PROMPT, QUIZ_VARIANT_PROMPT_VERSION),
+    "quiz_grade": (QUIZ_GRADE_PROMPT, QUIZ_GRADE_PROMPT_VERSION),
+    "explanation": (EXPLANATION_PROMPT, EXPLANATION_PROMPT_VERSION),
+    "train_question": (TRAIN_QUESTION_PROMPT, TRAIN_QUESTION_PROMPT_VERSION),
+}

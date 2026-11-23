@@ -1,0 +1,243 @@
+<script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref, computed, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { authState, bootstrapAuth, logout } from "./auth";
+import {
+  CircleDot, Plus, LayoutDashboard, GraduationCap, CircleUser, Sun, Moon, SunMoon,
+} from "lucide-vue-next";
+import { cyclePref, prefLabel, getPref, type ThemePref } from "./theme";
+import { cn } from "./lib/utils";
+
+const route = useRoute();
+const router = useRouter();
+const toast = ref("");
+let toastTimer = 0;
+
+function showToast(msg: string) {
+  toast.value = msg;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => (toast.value = ""), 2600);
+}
+
+onMounted(async () => {
+  await bootstrapAuth();
+  (window as any).__toast = showToast;
+});
+
+// 会话在页面停留期间失效（或首屏加载时守卫尚未就绪）：主动踢回登录页
+watch(
+  () => [authState.ready, authState.authEnabled, authState.viewer] as const,
+  ([ready, enabled, viewer]) => {
+    if (ready && enabled && !viewer && route.name !== "login") {
+      router.push({ name: "login" });
+    }
+  }
+);
+
+const isLoginPage = computed(() => route.name === "login");
+
+// 头像菜单：悬停自动展开（移开 0.5s 收起），点击可开合，点外部 / Esc 即关闭
+const menuOpen = ref(false);
+let menuCloseTimer = 0;
+function toggleMenu() {
+  window.clearTimeout(menuCloseTimer);
+  menuOpen.value = !menuOpen.value;
+}
+function closeMenu() {
+  window.clearTimeout(menuCloseTimer);
+  menuOpen.value = false;
+}
+function openMenuOnHover() {
+  window.clearTimeout(menuCloseTimer);
+  menuOpen.value = true;
+}
+function scheduleMenuClose() {
+  window.clearTimeout(menuCloseTimer);
+  menuCloseTimer = window.setTimeout(() => (menuOpen.value = false), 500);
+}
+function onDocClick() {
+  menuOpen.value = false;
+}
+function onEsc(e: KeyboardEvent) {
+  if (e.key === "Escape") menuOpen.value = false;
+}
+watch(menuOpen, (open) => {
+  if (open) {
+    document.addEventListener("click", onDocClick);
+    document.addEventListener("keydown", onEsc);
+  } else {
+    document.removeEventListener("click", onDocClick);
+    document.removeEventListener("keydown", onEsc);
+  }
+});
+
+// 侧栏悬停展开：鼠标进入 rail（含左上「练」logo）即展开显示文字，移开 0.1s 收起
+const railOpen = ref(false);
+let railCloseTimer = 0;
+function openRail() {
+  window.clearTimeout(railCloseTimer);
+  railOpen.value = true;
+}
+function scheduleRailClose() {
+  window.clearTimeout(railCloseTimer);
+  railCloseTimer = window.setTimeout(() => (railOpen.value = false), 100);
+}
+
+onBeforeUnmount(() => {
+  window.clearTimeout(menuCloseTimer);
+  window.clearTimeout(railCloseTimer);
+  document.removeEventListener("click", onDocClick);
+  document.removeEventListener("keydown", onEsc);
+});
+
+const themePref = ref<ThemePref>(getPref());
+const ThemeIcon = computed(() =>
+  themePref.value === "light" ? Sun : themePref.value === "dark" ? Moon : SunMoon
+);
+function toggleTheme() {
+  themePref.value = cyclePref();
+  toast(`主题：${prefLabel[themePref.value]}`);
+}
+
+// rail 导航（design D4：纯图标 + hover tooltip + active 左缘指示条）
+const navs = [
+  { name: "today", ico: CircleDot, label: "今日训练" },
+  { name: "wizard", ico: Plus, label: "新建训练" },
+  { name: "dashboard", ico: LayoutDashboard, label: "仪表盘" },
+  { name: "trainings", ico: GraduationCap, label: "我的训练" },
+  { name: "me", ico: CircleUser, label: "我的" },
+];
+
+const pageTitle = computed(() => {
+  if (route.name === "wizard") return "新建训练";
+  return navs.find((n) => n.name === route.name)?.label || "";
+});
+
+const who = computed(() => {
+  if (authState.viewer) {
+    const v = authState.viewer as any;
+    return v.display_name || v.email || "我";
+  }
+  return "我";
+});
+const initial = computed(() => who.value.slice(0, 1).toUpperCase());
+
+async function doLogout() {
+  await logout();
+  router.push({ name: "login" });
+}
+</script>
+
+<template>
+  <div v-if="!authState.ready" class="flex min-h-screen items-center justify-center">
+    <span class="inline-block h-6 w-6 animate-spin rounded-full border-2 border-line border-t-primary" />
+  </div>
+  <router-view v-else-if="isLoginPage" />
+  <div v-else class="flex min-h-screen bg-bg text-text">
+    <!-- 图标 rail：悬停自动展开显示文字（移开 0.5s 收起），design D4 演进 -->
+    <aside
+      class="sticky top-0 flex h-screen flex-shrink-0 flex-col border-r border-line bg-surface transition-[width] duration-200 ease-in-out"
+      :class="railOpen ? 'w-[196px] items-stretch' : 'w-[72px] items-center'"
+      @mouseenter="openRail"
+      @mouseleave="scheduleRailClose"
+    >
+      <router-link
+        :to="{ name: 'today' }"
+        class="flex items-center gap-2.5"
+        :class="railOpen ? 'px-5 pt-4 pb-1' : 'mt-3 mb-2'"
+        title="训练教练 · 回首页"
+      >
+        <span class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-primary text-[15px] font-semibold text-white">练</span>
+        <span v-if="railOpen" class="text-sm font-semibold text-text">训练教练</span>
+      </router-link>
+
+      <nav class="flex flex-col gap-1 pt-2" :class="railOpen ? 'px-3' : 'items-center'">
+        <router-link
+          v-for="n in navs"
+          :key="n.name"
+          :to="{ name: n.name }"
+          class="relative flex h-11 items-center rounded-lg transition-colors"
+          :class="cn(
+            railOpen ? 'w-full justify-start gap-3 px-3' : 'w-11 justify-center',
+            route.name === n.name ? 'text-primary' : 'text-faint hover:bg-surface-2 hover:text-text',
+          )"
+        >
+          <!-- active 左缘 2px 青绿指示条 -->
+          <span
+            v-if="route.name === n.name"
+            class="absolute top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-primary"
+            :class="railOpen ? 'left-[-11px]' : 'left-[-14px]'"
+          />
+          <component :is="n.ico" class="h-5 w-5 flex-shrink-0" />
+          <span v-if="railOpen" class="truncate text-sm">{{ n.label }}</span>
+        </router-link>
+      </nav>
+
+      <!-- rail 底部：主题三态 + 关于 mini -->
+      <div class="mt-auto flex flex-col gap-1" :class="railOpen ? 'px-3 pb-4' : 'mb-3 items-center'">
+        <button
+          class="relative flex h-9 items-center rounded-lg text-faint transition-colors hover:bg-surface-2 hover:text-text"
+          :class="railOpen ? 'w-full justify-start gap-3 px-3' : 'w-9 justify-center'"
+          :title="'主题：' + prefLabel[themePref] + '（点击切换）'"
+          @click="toggleTheme"
+        >
+          <ThemeIcon class="h-4 w-4 flex-shrink-0" />
+          <span v-if="railOpen" class="text-sm">主题：{{ prefLabel[themePref] }}</span>
+        </button>
+        <button
+          class="relative flex h-9 items-center rounded-lg text-faint transition-colors hover:bg-surface-2 hover:text-text"
+          :class="railOpen ? 'w-full justify-start gap-3 px-3' : 'w-9 justify-center'"
+          title="训练教练：意图驱动 → 澄清 → 边缘定位 → 路径 → 每日训练 → 测验达标；判分 = 要点清单 × 规则层，可解释"
+        >
+          <span class="flex h-4 w-4 flex-shrink-0 items-center justify-center text-[13px] font-medium">?</span>
+          <span v-if="railOpen" class="text-left text-xs leading-4 text-muted">训练教练是什么</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- 52px 顶栏 + 1080px 内容区 -->
+    <div class="flex min-w-0 flex-1 flex-col">
+      <header class="sticky top-0 z-40 flex h-[52px] items-center justify-between border-b border-line bg-surface/90 px-5 backdrop-blur">
+        <div class="text-[15px] font-semibold">{{ pageTitle }}</div>
+        <div
+          class="relative"
+          @click.stop
+          @mouseenter="openMenuOnHover"
+          @mouseleave="scheduleMenuClose"
+        >
+          <button
+            class="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-[13px] font-semibold text-white"
+            @click="toggleMenu"
+          >{{ initial }}</button>
+          <div v-if="menuOpen" class="absolute right-0 top-10 z-50 w-44 rounded-lg border border-line bg-surface p-1 shadow-lg" @click="closeMenu">
+            <div class="border-b border-line px-3 py-2">
+              <div class="text-sm font-medium">{{ who }}</div>
+              <div class="text-xs text-faint">{{ authState.viewer ? '已登录' : '本地模式' }}</div>
+            </div>
+            <router-link :to="{ name: 'me' }" class="block rounded-md px-3 py-2 text-sm text-text hover:bg-surface-2">个人中心</router-link>
+            <button
+              class="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm text-text hover:bg-surface-2"
+              @click.stop="toggleTheme"
+            >
+              <span>主题</span>
+              <span class="text-xs text-faint">{{ prefLabel[themePref] }}</span>
+            </button>
+            <button v-if="authState.authEnabled" class="w-full rounded-md px-3 py-2 text-left text-sm text-danger hover:bg-danger-weak" @click="doLogout">退出登录</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="mx-auto w-full max-w-[1080px] px-6 py-6">
+        <router-view />
+      </main>
+    </div>
+  </div>
+  <div
+    v-if="toast"
+    class="fixed bottom-6 left-1/2 z-[100] -translate-x-1/2 rounded-lg border border-line bg-surface px-4 py-2 text-sm text-text shadow-lg"
+  >{{ toast }}</div>
+</template>
+
+<style scoped>
+/* cn 在本文件仅用于 class 绑定场景；此处保留空 style 块占位以便后续局部样式 */
+</style>
